@@ -1,5 +1,3 @@
-
-````markdown
 # 🎓 Education Portal
 
 A comprehensive, secure, and scalable web application for academic management  
