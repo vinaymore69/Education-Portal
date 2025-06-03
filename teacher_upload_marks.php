@@ -3,86 +3,74 @@
 session_start();
 require 'connection.php';
 
-// 1) Only allow teachers
+// 1) Only Teachers allowed:
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'teacher') {
-    // If not logged in or not a teacher, send them to login
     header("Location: login.php?role=teacher");
     exit();
 }
 
-// 2) Retrieve any flash‐messages set by the processor
-$successMsg = $_SESSION['upload_success'] ?? '';
-$errorMsg   = $_SESSION['upload_error']   ?? '';
+// 2) (Optional) Fetch list of semesters for a dropdown. 
+//    Adjust if your `semesters` table has different columns.
+$semesters = [];
+$stmt = $conn->prepare("SELECT id, name FROM semesters ORDER BY id");
+$stmt->execute();
+$stmt->bind_result($sem_id, $sem_name);
+while ($stmt->fetch()) {
+    $semesters[] = ['id' => $sem_id, 'name' => $sem_name];
+}
+$stmt->close();
+
+// If there was a flash‐message in session, grab it:
+$uploadSuccess = $_SESSION['upload_success'] ?? '';
+$uploadError   = $_SESSION['upload_error']   ?? '';
 unset($_SESSION['upload_success'], $_SESSION['upload_error']);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Teacher • Upload Semester Marks</title>
-  <link rel="stylesheet" href="css/style.css" />
+    <meta charset="UTF-8">
+    <title>Upload Student Marks</title>
+    <style>
+      body { font-family: Arial, sans-serif; }
+      .container { max-width: 600px; margin: 40px auto; }
+      .alert { padding: 10px; margin-bottom: 20px; border-radius: 4px; }
+      .alert-success { background-color: #e0f6e9; color: #2d6a4f; }
+      .alert-error   { background-color: #ffe5e5; color: #9d0208; }
+      label, select, input[type="file"], button { display: block; width: 100%; margin-bottom: 12px; }
+      button { padding: 10px; background: #1d3557; color: white; border: none; border-radius: 4px; }
+      button:hover { background: #457b9d; cursor: pointer; }
+    </style>
 </head>
 <body>
-  <div style="max-width:600px; margin:50px auto;">
-    <h2>Teacher Dashboard → Upload Semester Marks</h2>
-    <p>
-      Logged in as <strong><?= htmlspecialchars($_SESSION['user_id']) ?></strong> – 
-      <a href="logout.php">Logout</a>
-    </p>
-    <hr>
+  <div class="container">
+    <h2>Upload Marks for a Semester</h2>
 
-    <?php if ($successMsg): ?>
-      <p style="color:green;"><?= $successMsg ?></p>
+    <!-- Show Success or Error -->
+    <?php if ($uploadSuccess): ?>
+      <div class="alert alert-success"><?= $uploadSuccess ?></div>
+    <?php endif; ?>
+    <?php if ($uploadError): ?>
+      <div class="alert alert-error" style="white-space: pre-wrap;"><?= nl2br($uploadError) ?></div>
     <?php endif; ?>
 
-    <?php if ($errorMsg): ?>
-      <p style="color:red;"><?= nl2br(htmlspecialchars($errorMsg)) ?></p>
-    <?php endif; ?>
+    <form action="teacher_marks_processor.php" method="post" enctype="multipart/form-data">
+      <!-- Semester dropdown -->
+      <label for="semester">Select Semester:</label>
+      <select name="semester" id="semester" required>
+        <option value="" disabled selected>-- Choose Semester --</option>
+        <?php foreach ($semesters as $sem): ?>
+          <option value="<?= htmlspecialchars($sem['name'], ENT_QUOTES) ?>">
+            <?= htmlspecialchars(strtoupper($sem['name'])) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
 
-    <form 
-      action="teacher_marks_processor.php" 
-      method="post" 
-      enctype="multipart/form-data"
-    >
-      <div style="margin-bottom:10px;">
-        <label for="semester">Select Semester:</label><br>
-        <select name="semester" id="semester" required>
-          <option value="">-- Choose Semester --</option>
-          <option value="sem1">Semester 1</option>
-          <option value="sem2">Semester 2</option>
-          <option value="sem3">Semester 3</option>
-          <option value="sem4">Semester 4</option>
-          <option value="sem5">Semester 5</option>
-          <option value="sem6">Semester 6</option>
-        </select>
-      </div>
+      <!-- File input -->
+      <label for="marks_file">Choose .xlsx / .xls / .csv file:</label>
+      <input type="file" name="marks_file" id="marks_file" accept=".xlsx,.xls,.csv" required>
 
-      <div style="margin-bottom:10px;">
-        <label for="marks_file">Upload Excel/CSV File:</label><br>
-        <input 
-          type="file"
-          name="marks_file"
-          id="marks_file"
-          accept=".xlsx,.xls,.csv"
-          required
-        >
-      </div>
-
-      <button type="submit">Upload Marks</button>
+      <button type="submit">Upload & Process</button>
     </form>
-
-    <hr>
-    <p><strong>Important Notes:</strong></p>
-    <ul>
-      <li>The <code>first row</code> of your spreadsheet <strong>must</strong> be a header row. The first header‐cell must be <code>roll_number</code> (all lowercase, no spaces). All other header cells become <em>subject names</em> (all lowercase, no spaces; use underscores if needed).</li>
-      <li>Example of a valid <code>Semester 1</code> header row:  
-        <code>roll_number | math | physics | chemistry</code></li>
-      <li>Example of a valid <code>Semester 2</code> header row:  
-        <code>roll_number | data_structures | algorithms | dbms</code></li>
-      <li>Each subsequent row corresponds to one student. The script looks up <code>students.roll_number</code> and inserts (or updates) their marks into the <code>marks</code> table.</li>
-      <li>If a <code>roll_number</code> in a data row isn’t found in the <code>students</code> table, that row is skipped and an error is reported.</li>
-      <li>Re‐uploading for the same <code>semester + subject</code> combination will <em>update</em> existing marks instead of creating duplicates.</li>
-    </ul>
   </div>
 </body>
 </html>

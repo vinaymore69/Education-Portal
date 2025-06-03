@@ -2,7 +2,7 @@
 // teacher_marks_processor.php
 session_start();
 require 'connection.php';
-require 'vendor/autoload.php'; // Make sure Composer + PhpSpreadsheet are installed
+require 'vendor/autoload.php';  // PhpSpreadsheet must be installed via Composer
 
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
@@ -18,7 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 // 2) Validate the "semester" field
-$semester_name = $_POST['semester'] ?? '';
+$semester_name = trim($_POST['semester'] ?? '');
 $valid_sems    = ['sem1','sem2','sem3','sem4','sem5','sem6'];
 if (!in_array($semester_name, $valid_sems, true)) {
     $_SESSION['upload_error'] = "Invalid semester selected.";
@@ -26,7 +26,7 @@ if (!in_array($semester_name, $valid_sems, true)) {
     exit();
 }
 
-// 3) Look up semester_id from `semesters` table
+// 3) Lookup semester_id from `semesters` table
 $stmt = $conn->prepare("SELECT id FROM semesters WHERE name = ? LIMIT 1");
 $stmt->bind_param('s', $semester_name);
 $stmt->execute();
@@ -66,7 +66,7 @@ try {
     }
     $spreadsheet = $reader->load($fileTmp);
     $sheet       = $spreadsheet->getActiveSheet();
-    // toArray(null, true, true, true) returns rows as associative arrays keyed by column letter:
+    // toArray(null, true, true, true) returns rows as associative arrays keyed by column letter
     $rows = $sheet->toArray(null, true, true, true);
 } catch (\PhpOffice\PhpSpreadsheet\Reader\Exception $e) {
     $_SESSION['upload_error'] = "Error reading spreadsheet: " . $e->getMessage();
@@ -75,11 +75,16 @@ try {
 }
 
 // 6) Parse the header (row #1)
-$headerRow = $rows[1];  
-// Example: ['A' => 'roll_number', 'B' => 'math', 'C' => 'physics', …]
-// Lowercase & trim all header‐cell values
+$headerRow = $rows[1] ?? [];
+if (empty($headerRow)) {
+    $_SESSION['upload_error'] = "Spreadsheet is empty or missing header row.";
+    header("Location: teacher_upload_marks.php");
+    exit();
+}
+
+// Normalize header names (lowercase, trimmed)
 foreach ($headerRow as $colLetter => $colName) {
-    $headerRow[$colLetter] = strtolower(trim($colName));
+    $headerRow[$colLetter] = strtolower(trim((string)$colName));
 }
 
 // Build a map: columnName → columnLetter
@@ -113,34 +118,40 @@ if (empty($subjectNames)) {
 $rowsProcessed = 0;
 $errors        = [];
 
+// PREPARE a statement to lookup students.id by matching students.roll_number:
+$stmtLookupStudent = $conn->prepare("
+    SELECT id
+    FROM students
+    WHERE roll_number = ?
+    LIMIT 1
+");
+
 for ($rowNum = 2; $rowNum <= count($rows); $rowNum++) {
     $row = $rows[$rowNum];
 
     // 7a) Get roll_number from the corresponding column letter
-    $rollNumber = trim($row[$columns['roll_number']]);
+    $rollNumber = trim((string)$row[$columns['roll_number']]);
     if ($rollNumber === '') {
         // Skip any row with blank roll_number
         continue;
     }
 
-    // 7b) Look up that student's ID
-    $stmt = $conn->prepare("SELECT id FROM students WHERE roll_number = ? LIMIT 1");
-    $stmt->bind_param('s', $rollNumber);
-    $stmt->execute();
-    $stmt->store_result();
-    if ($stmt->num_rows === 0) {
-        $errors[] = "Row $rowNum: Student with roll_number '$rollNumber' not found.";
-        $stmt->close();
+    // 7b) Look up that student's table ID via students.roll_number
+    $stmtLookupStudent->bind_param('s', $rollNumber);
+    $stmtLookupStudent->execute();
+    $stmtLookupStudent->store_result();
+    if ($stmtLookupStudent->num_rows === 0) {
+        $errors[] = "Row $rowNum: Student with roll_number '$rollNumber' not found in students table.";
         continue;
     }
-    $stmt->bind_result($student_id);
-    $stmt->fetch();
-    $stmt->close();
+    $stmtLookupStudent->bind_result($student_table_id);
+    $stmtLookupStudent->fetch();
+    $stmtLookupStudent->free_result();
 
     // 7c) For each subject-column, read marks and upsert into `marks`
     foreach ($subjectNames as $subject) {
         $colLetter = $columns[$subject];
-        $markValue = trim($row[$colLetter]);
+        $markValue = trim((string)$row[$colLetter]);
 
         if ($markValue === '' || !is_numeric($markValue)) {
             // If blank or not numeric, skip it
@@ -150,14 +161,14 @@ for ($rowNum = 2; $rowNum <= count($rows); $rowNum++) {
 
         // Check if a row already exists for (student_id, semester_id, subject)
         $stmtCheck = $conn->prepare("
-          SELECT id
-          FROM marks
-          WHERE student_id = ? 
-            AND semester_id = ? 
-            AND subject = ?
-          LIMIT 1
+            SELECT id
+            FROM marks
+            WHERE student_id = ?
+              AND semester_id = ?
+              AND subject = ?
+            LIMIT 1
         ");
-        $stmtCheck->bind_param('iis', $student_id, $semester_id, $subject);
+        $stmtCheck->bind_param('iis', $student_table_id, $semester_id, $subject);
         $stmtCheck->execute();
         $stmtCheck->store_result();
 
@@ -168,9 +179,9 @@ for ($rowNum = 2; $rowNum <= count($rows); $rowNum++) {
             $stmtCheck->close();
 
             $stmtUpd = $conn->prepare("
-              UPDATE marks
-              SET marks_obtained = ?
-              WHERE id = ?
+                UPDATE marks 
+                SET marks_obtained = ?
+                WHERE id = ?
             ");
             $stmtUpd->bind_param('ii', $markInt, $existing_id);
             $stmtUpd->execute();
@@ -179,11 +190,11 @@ for ($rowNum = 2; $rowNum <= count($rows); $rowNum++) {
             // INSERT new record
             $stmtCheck->close();
             $stmtIns = $conn->prepare("
-              INSERT INTO marks
-                (student_id, semester_id, subject, marks_obtained)
-              VALUES (?, ?, ?, ?)
+                INSERT INTO marks
+                  (student_id, semester_id, subject, marks_obtained)
+                VALUES (?, ?, ?, ?)
             ");
-            $stmtIns->bind_param('iisi', $student_id, $semester_id, $subject, $markInt);
+            $stmtIns->bind_param('iisi', $student_table_id, $semester_id, $subject, $markInt);
             $stmtIns->execute();
             $stmtIns->close();
         }
@@ -191,6 +202,7 @@ for ($rowNum = 2; $rowNum <= count($rows); $rowNum++) {
 
     $rowsProcessed++;
 }
+$stmtLookupStudent->close();
 
 // 8) Store flash messages & redirect back
 if (empty($errors)) {
